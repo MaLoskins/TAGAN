@@ -43,19 +43,53 @@ def temporal_node_classification_metrics(predictions: List[torch.Tensor],
     
     # Concatenate predictions and labels
     if all_preds and all_labels:
-        all_preds = np.concatenate(all_preds)
-        all_labels = np.concatenate(all_labels)
-        
-        # Compute metrics
-        accuracy = accuracy_score(all_labels, all_preds)
-        macro_f1 = f1_score(all_labels, all_preds, average='macro')
-        micro_f1 = f1_score(all_labels, all_preds, average='micro')
-        
-        return {
-            'accuracy': accuracy,
-            'macro_f1': macro_f1,
-            'micro_f1': micro_f1
-        }
+        try:
+            all_preds = np.concatenate(all_preds)
+            all_labels = np.concatenate(all_labels)
+            
+            # Check if shapes match
+            if all_preds.shape != all_labels.shape:
+                print(f"Warning: Prediction shape {all_preds.shape} doesn't match label shape {all_labels.shape}")
+                # Try to reshape if possible
+                if all_preds.size == all_labels.size:
+                    all_preds = all_preds.reshape(all_labels.shape)
+            
+            # Ensure types are compatible
+            if all_preds.dtype != all_labels.dtype:
+                print(f"Converting predictions from {all_preds.dtype} to {all_labels.dtype}")
+                all_preds = all_preds.astype(all_labels.dtype)
+            
+            # Compute metrics
+            try:
+                accuracy = accuracy_score(all_labels, all_preds)
+            except Exception as e:
+                print(f"Error computing accuracy: {e}")
+                accuracy = 0.0
+                
+            try:
+                macro_f1 = f1_score(all_labels, all_preds, average='macro')
+            except Exception as e:
+                print(f"Error computing macro F1: {e}")
+                macro_f1 = 0.0
+                
+            try:
+                micro_f1 = f1_score(all_labels, all_preds, average='micro')
+            except Exception as e:
+                print(f"Error computing micro F1: {e}")
+                micro_f1 = 0.0
+            
+            return {
+                'accuracy': accuracy,
+                'macro_f1': macro_f1,
+                'micro_f1': micro_f1
+            }
+        except Exception as e:
+            print(f"Error in temporal_node_classification_metrics: {e}")
+            return {
+                'accuracy': 0.0,
+                'macro_f1': 0.0,
+                'micro_f1': 0.0
+            }
     else:
         return {
             'accuracy': 0.0,
@@ -100,17 +134,41 @@ def temporal_link_prediction_metrics(edge_scores: List[torch.Tensor],
     
     # Concatenate scores and labels
     if all_scores and all_labels:
-        all_scores = np.concatenate(all_scores)
-        all_labels = np.concatenate(all_labels)
-        
-        # Compute metrics
-        auc = roc_auc_score(all_labels, all_scores)
-        ap = average_precision_score(all_labels, all_scores)
-        
-        return {
-            'auc': auc,
-            'ap': ap
-        }
+        try:
+            all_scores = np.concatenate(all_scores)
+            all_labels = np.concatenate(all_labels)
+            
+            # Check if we have enough data for meaningful metrics
+            if len(np.unique(all_labels)) < 2:
+                print("Warning: Not enough class diversity for AUC/AP calculation")
+                return {
+                    'auc': 0.0,
+                    'ap': 0.0
+                }
+            
+            # Compute metrics
+            try:
+                auc = roc_auc_score(all_labels, all_scores)
+            except Exception as e:
+                print(f"Error computing AUC: {e}")
+                auc = 0.0
+                
+            try:
+                ap = average_precision_score(all_labels, all_scores)
+            except Exception as e:
+                print(f"Error computing AP: {e}")
+                ap = 0.0
+            
+            return {
+                'auc': auc,
+                'ap': ap
+            }
+        except Exception as e:
+            print(f"Error in temporal_link_prediction_metrics: {e}")
+            return {
+                'auc': 0.0,
+                'ap': 0.0
+            }
     else:
         return {
             'auc': 0.0,
@@ -293,12 +351,20 @@ def evaluate_long_term_dependencies(model, temporal_graph, snapshot_sequences,
                     future_labels.append(labels)
                     future_masks.append(mask)
                 
-                # Compute metrics
-                metrics = temporal_node_classification_metrics(
-                    future_preds, 
-                    future_labels, 
-                    future_masks
-                )
+                # Check if we have valid predictions and labels
+                if future_preds and future_labels and future_masks:
+                    try:
+                        # Compute metrics
+                        metrics = temporal_node_classification_metrics(
+                            future_preds,
+                            future_labels,
+                            future_masks
+                        )
+                    except Exception as e:
+                        print(f"Error computing node classification metrics: {e}")
+                        metrics = {'accuracy': 0.0, 'macro_f1': 0.0, 'micro_f1': 0.0}
+                else:
+                    metrics = {'accuracy': 0.0, 'macro_f1': 0.0, 'micro_f1': 0.0}
                 
             elif task == 'link_prediction':
                 # Get predictions for future snapshots
@@ -307,15 +373,22 @@ def evaluate_long_term_dependencies(model, temporal_graph, snapshot_sequences,
                 future_neg_edges = []
                 
                 for snapshot in future:
-                    # Get true edges
-                    true_edges = torch.tensor(snapshot['edges']).to(device)
-                    
-                    # Generate negative samples (placeholder - replace with actual negative sampling)
-                    neg_edges = torch.zeros_like(true_edges).to(device)
-                    
-                    # Get predictions
-                    with torch.no_grad():
-                        scores = model.predict(temporal_graph, [snapshot], task='link_prediction')
+                    try:
+                        # Get true edges
+                        true_edges = torch.tensor(snapshot['edges'], dtype=torch.long).to(device)
+                        
+                        # Generate negative samples (placeholder - replace with actual negative sampling)
+                        neg_edges = torch.zeros_like(true_edges).to(device)
+                        
+                        # Get predictions
+                        with torch.no_grad():
+                            scores = model.predict(temporal_graph, [snapshot], task='link_prediction')
+                            
+                        future_scores.append(scores)
+                        future_true_edges.append(true_edges)
+                        future_neg_edges.append(neg_edges)
+                    except Exception as e:
+                        print(f"Error processing snapshot for link prediction: {e}")
                     
                     future_scores.append(scores)
                     future_true_edges.append(true_edges)

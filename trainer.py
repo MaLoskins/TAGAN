@@ -47,16 +47,18 @@ class TemporalTrainer:
             'val_metrics': []
         }
     
-    def train(self, 
-             num_epochs: int = 200, 
-             batch_size: int = 32, 
-             sequence_length: int = 10, 
-             learning_rate: float = 0.001, 
-             weight_decay: float = 5e-4, 
-             val_ratio: float = 0.2, 
+    def train(self,
+             num_epochs: int = 200,
+             batch_size: int = 32,
+             sequence_length: int = 10,
+             learning_rate: float = 0.001,
+             weight_decay: float = 5e-4,
+             val_ratio: float = 0.2,
              task: str = 'node_classification',
              patience: int = 10,
-             verbose: bool = True) -> Dict:
+             verbose: bool = True,
+             scheduler_type: str = 'plateau',  # 'plateau', 'cosine', or None
+             scheduler_params: Dict = None) -> Dict:
         """
         Train the TempGAT model.
         
@@ -70,21 +72,71 @@ class TemporalTrainer:
             task: Task to train for ('node_classification' or 'link_prediction')
             patience: Number of epochs to wait for improvement before early stopping
             verbose: Whether to print progress
+            scheduler_type: Type of learning rate scheduler to use:
+                - 'plateau': ReduceLROnPlateau (reduces LR when metric plateaus)
+                - 'cosine': CosineAnnealingLR (cosine annealing schedule)
+                - None: No scheduler
+            scheduler_params: Parameters for the scheduler:
+                - For 'plateau': {'factor': 0.1, 'patience': 5, 'min_lr': 1e-6}
+                - For 'cosine': {'T_max': num_epochs, 'eta_min': 0}
             
         Returns:
             Training history
         """
         # Create optimizer
         optimizer = optim.Adam(
-            self.model.parameters(), 
-            lr=learning_rate, 
+            self.model.parameters(),
+            lr=learning_rate,
             weight_decay=weight_decay
         )
         
+        # Create learning rate scheduler
+        scheduler = None
+        if scheduler_type:
+            if scheduler_params is None:
+                scheduler_params = {}
+                
+            if scheduler_type == 'plateau':
+                # Default parameters for ReduceLROnPlateau
+                default_params = {
+                    'factor': 0.1,       # Factor by which to reduce LR
+                    'patience': 5,       # Number of epochs with no improvement
+                    'min_lr': 1e-6       # Minimum LR
+                }
+                # Update with user-provided parameters
+                default_params.update(scheduler_params)
+                
+                # Remove 'verbose' if it exists in the parameters
+                if 'verbose' in default_params:
+                    del default_params['verbose']
+                
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode='min',  # Minimize validation loss
+                    **default_params
+                )
+                
+            elif scheduler_type == 'cosine':
+                # Default parameters for CosineAnnealingLR
+                default_params = {
+                    'T_max': num_epochs,  # Maximum number of iterations
+                    'eta_min': 0          # Minimum learning rate
+                }
+                # Update with user-provided parameters
+                default_params.update(scheduler_params)
+                
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    **default_params
+                )
+                
+            else:
+                print(f"Warning: Unknown scheduler type '{scheduler_type}'. No scheduler will be used.")
+        
         # Create batches
         all_batches = create_temporal_batches(
-            self.temporal_graph, 
-            batch_size, 
+            self.temporal_graph,
+            batch_size,
             sequence_length
         )
         
@@ -96,6 +148,9 @@ class TemporalTrainer:
         # Training loop
         best_val_loss = float('inf')
         patience_counter = 0
+        
+        # Add learning rate tracking to history
+        self.history['learning_rates'] = []
         
         for epoch in range(num_epochs):
             # Training phase
@@ -121,9 +176,23 @@ class TemporalTrainer:
                         last_snapshot = sequence[-1]
                         active_nodes = last_snapshot['active_nodes']
                         
-                        # Get labels for active nodes (placeholder - replace with actual labels)
-                        # In a real implementation, you would get labels from your data
-                        labels = torch.zeros(len(active_nodes), dtype=torch.long).to(self.device)
+                        # Get labels for active nodes
+                        # Check if temporal_graph has node_labels
+                        if hasattr(self.temporal_graph, 'node_labels'):
+                            # Get labels for active nodes
+                            node_labels = []
+                            for node_id in active_nodes:
+                                if node_id in self.temporal_graph.node_labels:
+                                    node_labels.append(self.temporal_graph.node_labels[node_id])
+                                else:
+                                    # Use 0 as default label
+                                    node_labels.append(0)
+                            
+                            # Convert to tensor
+                            labels = torch.tensor(node_labels, dtype=torch.long).to(self.device)
+                        else:
+                            # Use placeholder labels if no node_labels available
+                            labels = torch.zeros(len(active_nodes), dtype=torch.long).to(self.device)
                         
                         # Create mask for nodes with labels
                         mask = torch.ones(len(active_nodes), dtype=torch.bool).to(self.device)
@@ -136,7 +205,7 @@ class TemporalTrainer:
                         last_snapshot = sequence[-1]
                         
                         # Get true edges
-                        true_edges = torch.tensor(last_snapshot['edges']).to(self.device)
+                        true_edges = torch.tensor(last_snapshot['edges'], dtype=torch.long).to(self.device)
                         
                         # Generate negative samples (placeholder - replace with actual negative sampling)
                         # In a real implementation, you would sample negative edges
@@ -189,6 +258,21 @@ class TemporalTrainer:
                     print(f"Val Accuracy: {val_metrics['accuracy']:.4f}")
                 elif task == 'link_prediction':
                     print(f"Val AUC: {val_metrics['auc']:.4f} - Val AP: {val_metrics['ap']:.4f}")
+                
+                # Print current learning rate
+                current_lr = optimizer.param_groups[0]['lr']
+                self.history['learning_rates'].append(current_lr)
+                if verbose:
+                    print(f"Learning rate: {current_lr:.6f}")
+            
+            # Update scheduler
+            if scheduler is not None:
+                if scheduler_type == 'plateau':
+                    # ReduceLROnPlateau needs validation loss
+                    scheduler.step(val_loss)
+                elif scheduler_type == 'cosine':
+                    # CosineAnnealingLR steps every epoch
+                    scheduler.step()
             
             # Early stopping
             if val_loss < best_val_loss:
@@ -237,9 +321,23 @@ class TemporalTrainer:
                         last_snapshot = sequence[-1]
                         active_nodes = last_snapshot['active_nodes']
                         
-                        # Get labels for active nodes (placeholder - replace with actual labels)
-                        # In a real implementation, you would get labels from your data
-                        labels = torch.zeros(len(active_nodes), dtype=torch.long).to(self.device)
+                        # Get labels for active nodes
+                        # Check if temporal_graph has node_labels
+                        if hasattr(self.temporal_graph, 'node_labels'):
+                            # Get labels for active nodes
+                            node_labels = []
+                            for node_id in active_nodes:
+                                if node_id in self.temporal_graph.node_labels:
+                                    node_labels.append(self.temporal_graph.node_labels[node_id])
+                                else:
+                                    # Use 0 as default label
+                                    node_labels.append(0)
+                            
+                            # Convert to tensor
+                            labels = torch.tensor(node_labels, dtype=torch.long).to(self.device)
+                        else:
+                            # Use placeholder labels if no node_labels available
+                            labels = torch.zeros(len(active_nodes), dtype=torch.long).to(self.device)
                         
                         # Create mask for nodes with labels
                         mask = torch.ones(len(active_nodes), dtype=torch.bool).to(self.device)
@@ -259,7 +357,7 @@ class TemporalTrainer:
                         last_snapshot = sequence[-1]
                         
                         # Get true edges
-                        true_edges = torch.tensor(last_snapshot['edges']).to(self.device)
+                        true_edges = torch.tensor(last_snapshot['edges'], dtype=torch.long).to(self.device)
                         
                         # Generate negative samples (placeholder - replace with actual negative sampling)
                         # In a real implementation, you would sample negative edges
@@ -324,10 +422,14 @@ class TemporalTrainer:
     
     def plot_training_history(self):
         """Plot the training history."""
-        plt.figure(figsize=(12, 4))
+        # Determine number of subplots needed
+        has_learning_rates = 'learning_rates' in self.history and self.history['learning_rates']
+        num_plots = 3 if has_learning_rates else 2
+        
+        plt.figure(figsize=(15, 4))
         
         # Plot loss
-        plt.subplot(1, 2, 1)
+        plt.subplot(1, num_plots, 1)
         plt.plot(self.history['train_loss'], label='Train Loss')
         plt.plot(self.history['val_loss'], label='Val Loss')
         plt.xlabel('Epoch')
@@ -336,7 +438,7 @@ class TemporalTrainer:
         plt.legend()
         
         # Plot metrics
-        plt.subplot(1, 2, 2)
+        plt.subplot(1, num_plots, 2)
         
         if self.history['val_metrics'] and 'accuracy' in self.history['val_metrics'][0]:
             # Plot accuracy for node classification
@@ -356,6 +458,16 @@ class TemporalTrainer:
             plt.ylabel('Score')
             plt.title('Validation Metrics')
             plt.legend()
+        
+        # Plot learning rates if available
+        if has_learning_rates:
+            plt.subplot(1, num_plots, 3)
+            plt.plot(self.history['learning_rates'], label='Learning Rate')
+            plt.xlabel('Epoch')
+            plt.ylabel('Learning Rate')
+            plt.title('Learning Rate Schedule')
+            plt.yscale('log')  # Log scale for better visualization
+            plt.grid(True)
         
         plt.tight_layout()
         plt.show()

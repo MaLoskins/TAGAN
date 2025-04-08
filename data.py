@@ -183,7 +183,9 @@ class TemporalGraph:
                 # Use zeros for nodes without features
                 features.append(np.zeros(self.feature_dim))
         
-        return torch.FloatTensor(np.array(features))
+        # Ensure all features are float arrays
+        features_array = np.array([np.array(f, dtype=np.float32) for f in features])
+        return torch.FloatTensor(features_array)
     
     def create_adjacency_matrix(self, snapshot):
         """

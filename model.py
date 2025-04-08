@@ -244,22 +244,165 @@ class SnapshotGAT(nn.Module):
         return x
 
 
+class TemporalAttention(nn.Module):
+    """
+    Temporal attention layer for attending to node states across time.
+    """
+    
+    def __init__(self, hidden_dim, num_heads=4, dropout=0.6, alpha=0.2):
+        """
+        Initialize temporal attention layer.
+        
+        Args:
+            hidden_dim: Dimension of hidden features
+            num_heads: Number of attention heads
+            dropout: Dropout probability
+            alpha: LeakyReLU negative slope
+        """
+        super(TemporalAttention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.alpha = alpha
+        
+        # Multi-head attention parameters
+        self.W = nn.Parameter(torch.zeros(size=(num_heads, hidden_dim, hidden_dim)))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+        
+        # Attention parameters
+        self.a = nn.Parameter(torch.zeros(size=(num_heads, 2 * hidden_dim, 1)))
+        nn.init.xavier_uniform_(self.a.data, gain=1.414)
+        
+        # LeakyReLU
+        self.leakyrelu = nn.LeakyReLU(alpha)
+        
+        # Dropout
+        self.dropout_layer = nn.Dropout(dropout)
+    
+    def forward(self, sequence_embeddings):
+        """
+        Apply temporal attention to sequence of node embeddings.
+        
+        Args:
+            sequence_embeddings: List of node embedding tensors [T, N, F]
+                where T is sequence length, N is number of nodes, F is feature dimension
+                
+        Returns:
+            Temporally attended node embeddings
+        """
+        # Stack embeddings along time dimension
+        if not sequence_embeddings:
+            return None
+            
+        # Get dimensions
+        seq_len = len(sequence_embeddings)
+        if seq_len <= 1:
+            return sequence_embeddings[-1] if seq_len > 0 else None
+            
+        # Process each node separately
+        device = sequence_embeddings[0].device
+        node_counts = [emb.size(0) for emb in sequence_embeddings]
+        max_nodes = max(node_counts)
+        feature_dim = sequence_embeddings[0].size(1)
+        
+        # Create padded tensor for all embeddings
+        padded_embeddings = torch.zeros(seq_len, max_nodes, feature_dim).to(device)
+        masks = torch.zeros(seq_len, max_nodes, dtype=torch.bool).to(device)
+        
+        # Fill padded tensor with embeddings and create masks
+        for t, embeddings in enumerate(sequence_embeddings):
+            num_nodes = embeddings.size(0)
+            padded_embeddings[t, :num_nodes] = embeddings
+            masks[t, :num_nodes] = True
+        
+        # Apply multi-head attention
+        outputs = []
+        for head in range(self.num_heads):
+            # Transform embeddings
+            transformed = torch.matmul(padded_embeddings, self.W[head])  # [T, N, F]
+            
+            # Compute attention scores between all time steps
+            attention_input = []
+            for t1 in range(seq_len):
+                for t2 in range(seq_len):
+                    # Concatenate embeddings from different time steps
+                    concat = torch.cat([
+                        transformed[t1].unsqueeze(1).repeat(1, max_nodes, 1),
+                        transformed[t2].unsqueeze(0).repeat(max_nodes, 1, 1)
+                    ], dim=2)  # [N, N, 2F]
+                    
+                    attention_input.append(concat)
+            
+            # Stack attention inputs
+            attention_input = torch.stack(attention_input)  # [T*T, N, N, 2F]
+            
+            # Compute attention coefficients
+            e = self.leakyrelu(torch.matmul(attention_input, self.a[head]))  # [T*T, N, N, 1]
+            e = e.squeeze(-1)  # [T*T, N, N]
+            
+            # Create attention mask based on node presence
+            att_mask = torch.zeros(seq_len, seq_len, max_nodes, max_nodes, dtype=torch.bool).to(device)
+            for t1 in range(seq_len):
+                for t2 in range(seq_len):
+                    # Nodes must be present in both time steps to attend
+                    att_mask[t1, t2] = masks[t1].unsqueeze(1) & masks[t2].unsqueeze(0)
+            
+            # Reshape mask to match attention scores
+            att_mask = att_mask.view(-1, max_nodes, max_nodes)  # [T*T, N, N]
+            
+            # Apply mask
+            e = e.masked_fill(~att_mask, -9e15)
+            
+            # Apply softmax to get attention weights
+            attention = F.softmax(e, dim=1)  # [T*T, N, N]
+            attention = self.dropout_layer(attention)
+            
+            # Apply attention to transformed embeddings
+            weighted = []
+            idx = 0
+            for t1 in range(seq_len):
+                t1_weighted = []
+                for t2 in range(seq_len):
+                    # Apply attention weights from t1 to t2
+                    attended = torch.matmul(attention[idx], transformed[t2])  # [N, F]
+                    t1_weighted.append(attended)
+                    idx += 1
+                # Combine attended values from all time steps
+                t1_weighted = torch.stack(t1_weighted).mean(dim=0)  # [N, F]
+                weighted.append(t1_weighted)
+            
+            # Get final output for this head
+            head_output = weighted[-1]  # Use the last time step's output
+            outputs.append(head_output)
+        
+        # Combine outputs from all heads
+        final_output = torch.mean(torch.stack(outputs), dim=0)  # [N, F]
+        
+        # Only keep embeddings for nodes that exist in the last time step
+        last_mask = masks[-1]
+        final_output = final_output[last_mask]
+        
+        return final_output
+
+
 class TempGAT(nn.Module):
     """
     Main model architecture for Temporal Graph Attention Network.
     
-    Composed of SnapshotGAT, MemoryBank, and temporal propagation logic.
+    Composed of SnapshotGAT, MemoryBank, temporal attention, and temporal propagation logic.
     """
     
-    def __init__(self, 
-                input_dim: int, 
-                hidden_dim: int, 
-                output_dim: int, 
-                num_heads: int = 8, 
-                memory_decay_factor: float = 0.9, 
-                dropout: float = 0.6, 
-                alpha: float = 0.2, 
-                max_memory_size: int = 10000):
+    def __init__(self,
+                input_dim: int,
+                hidden_dim: int,
+                output_dim: int,
+                num_heads: int = 8,
+                memory_decay_factor: float = 0.9,
+                dropout: float = 0.6,
+                alpha: float = 0.2,
+                max_memory_size: int = 10000,
+                temporal_attention_heads: int = 4,
+                use_temporal_attention: bool = True):
         """
         Initialize a TempGAT model.
         
@@ -272,12 +415,15 @@ class TempGAT(nn.Module):
             dropout: Dropout probability
             alpha: LeakyReLU negative slope
             max_memory_size: Maximum number of nodes to store in memory
+            temporal_attention_heads: Number of attention heads for temporal attention
+            use_temporal_attention: Whether to use temporal attention mechanism
         """
         super(TempGAT, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.num_heads = num_heads
+        self.use_temporal_attention = use_temporal_attention
         
         # Snapshot GAT model
         self.snapshot_gat = SnapshotGAT(
@@ -288,6 +434,15 @@ class TempGAT(nn.Module):
             dropout=dropout,
             alpha=alpha
         )
+        
+        # Temporal attention layer
+        if use_temporal_attention:
+            self.temporal_attention = TemporalAttention(
+                hidden_dim=output_dim,
+                num_heads=temporal_attention_heads,
+                dropout=dropout,
+                alpha=alpha
+            )
         
         # Memory bank
         self.memory_bank = MemoryBank(
@@ -322,12 +477,24 @@ class TempGAT(nn.Module):
         prev_snapshot = None
         
         for i, snapshot in enumerate(snapshot_sequence):
+            # Check if snapshot is a dictionary
+            if not isinstance(snapshot, dict):
+                print(f"Warning: Snapshot {i} is not a dictionary. Type: {type(snapshot)}")
+                continue
+                
             # Handle empty snapshots
-            if not snapshot['active_nodes']:
-                empty_snapshot = handle_empty_snapshot(
-                    snapshot['window_start'], 
-                    self.memory_bank
-                )
+            if 'active_nodes' not in snapshot or not snapshot['active_nodes']:
+                if 'window_start' in snapshot:
+                    empty_snapshot = handle_empty_snapshot(
+                        snapshot['window_start'],
+                        self.memory_bank
+                    )
+                else:
+                    # Use a default timestamp if window_start is not available
+                    empty_snapshot = handle_empty_snapshot(
+                        i * 15,  # Default window size of 15 minutes
+                        self.memory_bank
+                    )
                 snapshot = empty_snapshot
             
             # Get active nodes and features
@@ -379,6 +546,10 @@ class TempGAT(nn.Module):
             else:
                 # For single node or empty snapshot, just use initial embeddings
                 embeddings = initial_embeddings
+                
+            # Ensure embeddings have requires_grad=True for backpropagation
+            if not embeddings.requires_grad:
+                embeddings = embeddings.detach().clone().requires_grad_(True)
             
             # Store embeddings in memory bank
             timestamp = snapshot['window_start']
@@ -396,13 +567,36 @@ class TempGAT(nn.Module):
             # Update previous snapshot
             prev_snapshot = snapshot
         
-        # Return embeddings for the last snapshot
-        last_embeddings = all_embeddings[-1]['embeddings']
+        # Apply temporal attention if enabled and we have multiple snapshots
+        if self.use_temporal_attention and len(all_embeddings) > 1:
+            # Extract embeddings from all snapshots
+            sequence_embeddings = [snapshot['embeddings'] for snapshot in all_embeddings]
+            
+            # Apply temporal attention
+            temporal_embeddings = self.temporal_attention(sequence_embeddings)
+            
+            # Update the last snapshot's embeddings with temporally attended embeddings
+            if temporal_embeddings is not None:
+                all_embeddings[-1]['embeddings'] = temporal_embeddings
         
-        if return_embeddings:
-            return last_embeddings, all_embeddings
+        # Return embeddings for the last snapshot
+        if all_embeddings:
+            last_embeddings = all_embeddings[-1]['embeddings']
+            
+            if return_embeddings:
+                return last_embeddings, all_embeddings
+            else:
+                return last_embeddings
         else:
-            return last_embeddings
+            # If no snapshots were processed successfully, return empty tensor
+            print("Warning: No snapshots were processed successfully")
+            device = next(self.parameters()).device
+            empty_embeddings = torch.zeros(1, self.output_dim).to(device)
+            
+            if return_embeddings:
+                return empty_embeddings, []
+            else:
+                return empty_embeddings
     
     def predict(self, 
                temporal_graph, 
