@@ -159,11 +159,15 @@ class TemporalTrainer:
             start_time = time.time()
             
             # Process each batch
-            for batch in (tqdm(train_batches) if verbose else train_batches):
+            for batch_idx, batch in enumerate(tqdm(train_batches) if verbose else train_batches):
+                # Log memory usage less frequently to reduce output
+                if batch_idx % 50 == 0 and hasattr(torch.cuda, 'memory_allocated'):
+                    print(f"[Trainer] Epoch {epoch+1}, Batch {batch_idx}/{len(train_batches)}")
+                
                 # Process each sequence in the batch
                 batch_loss = 0.0
                 
-                for sequence in batch:
+                for seq_idx, sequence in enumerate(batch):
                     # Zero gradients
                     optimizer.zero_grad()
                     
@@ -226,6 +230,7 @@ class TemporalTrainer:
                     
                     # Backward pass and optimization
                     loss.backward()
+                    
                     optimizer.step()
                     
                     # Accumulate loss
@@ -234,6 +239,14 @@ class TemporalTrainer:
                 # Average loss for the batch
                 batch_loss /= len(batch)
                 train_loss += batch_loss
+                
+                # Force garbage collection and clear CUDA cache periodically
+                if batch_idx % 20 == 0 and hasattr(torch.cuda, 'memory_allocated'):
+                    import gc
+                    gc.collect()
+                    if hasattr(torch.cuda, 'empty_cache'):
+                        torch.cuda.empty_cache()
+            
             # Average loss for the epoch
             if len(train_batches) > 0:
                 train_loss /= len(train_batches)
@@ -241,7 +254,13 @@ class TemporalTrainer:
             else:
                 print("Warning: No training batches were created. Check your data and batch parameters.")
                 self.history['train_loss'].append(0.0)
-            self.history['train_loss'].append(train_loss)
+                
+            # Force garbage collection at the end of each epoch
+            import gc
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+                print(f"[Trainer] End of epoch {epoch+1}: GPU memory: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             
             # Validation phase
             val_loss, val_metrics = self.evaluate(val_batches, task)
@@ -307,7 +326,7 @@ class TemporalTrainer:
         
         with torch.no_grad():
             # Process each batch
-            for batch in batches:
+            for batch_idx, batch in enumerate(batches):
                 # Process each sequence in the batch
                 batch_loss = 0.0
                 
@@ -396,6 +415,12 @@ class TemporalTrainer:
         else:
             print("Warning: No evaluation batches were created. Check your data and batch parameters.")
             avg_loss = 0.0
+        
+        # Force garbage collection after evaluation
+        import gc
+        gc.collect()
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
         
         
         # Compute metrics

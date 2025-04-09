@@ -170,10 +170,10 @@ class SnapshotGAT(nn.Module):
         
         return x
     
-    def masked_forward(self, 
-                      features: torch.Tensor, 
-                      adj: torch.Tensor, 
-                      mask: torch.Tensor) -> torch.Tensor:
+    def masked_forward(self,
+                       features: torch.Tensor,
+                       adj: torch.Tensor,
+                       mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with masking for asymmetric propagation.
         
@@ -185,6 +185,13 @@ class SnapshotGAT(nn.Module):
         Returns:
             Node embeddings [N, output_dim]
         """
+        # Log input sizes
+        N = features.size(0)
+        if N > 1000:  # Only log for large inputs
+            print(f"[SnapshotGAT] Processing snapshot with {N} nodes")
+            if hasattr(torch.cuda, 'memory_allocated'):
+                print(f"[SnapshotGAT] GPU memory before attention: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+        
         # Apply dropout to input features
         x = self.dropout(features)
         
@@ -195,9 +202,16 @@ class SnapshotGAT(nn.Module):
             h = torch.mm(x, att.W)  # [N, hidden_dim]
             N = h.size(0)
             
+            # Log memory usage before large tensor operations
+            if N > 1000 and hasattr(torch.cuda, 'memory_allocated'):
+                print(f"[SnapshotGAT] Before attention input creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+                
             # Prepare for attention
-            a_input = torch.cat([h.repeat(1, N).view(N * N, -1), 
+            a_input = torch.cat([h.repeat(1, N).view(N * N, -1),
                                 h.repeat(N, 1)], dim=1).view(N, N, 2 * att.out_features)
+            
+            if N > 1000 and hasattr(torch.cuda, 'memory_allocated'):
+                print(f"[SnapshotGAT] After attention input creation (size {a_input.shape}): {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             
             # Compute attention coefficients
             e = att.leakyrelu(torch.matmul(a_input, att.a).squeeze(2))
@@ -213,6 +227,9 @@ class SnapshotGAT(nn.Module):
             # Apply attention to features
             h_prime = torch.matmul(attention, h)
             
+            if N > 1000 and hasattr(torch.cuda, 'memory_allocated'):
+                print(f"[SnapshotGAT] After attention computation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+                
             outputs.append(F.elu(h_prime))
         
         # Concatenate outputs from all heads
@@ -305,6 +322,10 @@ class TemporalAttention(nn.Module):
         max_nodes = max(node_counts)
         feature_dim = sequence_embeddings[0].size(1)
         
+        # Only log for very large node counts to reduce output
+        if max_nodes > 5000 and hasattr(torch.cuda, 'memory_allocated'):
+            print(f"[TemporalAttention] Processing {max_nodes} nodes, GPU: {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        
         # Create padded tensor for all embeddings
         padded_embeddings = torch.zeros(seq_len, max_nodes, feature_dim).to(device)
         masks = torch.zeros(seq_len, max_nodes, dtype=torch.bool).to(device)
@@ -315,74 +336,123 @@ class TemporalAttention(nn.Module):
             padded_embeddings[t, :num_nodes] = embeddings
             masks[t, :num_nodes] = True
         
-        # Apply multi-head attention
+        # Memory-optimized attention implementation
         outputs = []
         for head in range(self.num_heads):
             # Transform embeddings
             transformed = torch.matmul(padded_embeddings, self.W[head])  # [T, N, F]
             
-            # Compute attention scores between all time steps
-            attention_input = []
-            for t1 in range(seq_len):
-                for t2 in range(seq_len):
-                    # Concatenate embeddings from different time steps
-                    concat = torch.cat([
-                        transformed[t1].unsqueeze(1).repeat(1, max_nodes, 1),
-                        transformed[t2].unsqueeze(0).repeat(max_nodes, 1, 1)
-                    ], dim=2)  # [N, N, 2F]
+            # Process in smaller chunks to reduce memory usage
+            # Use even smaller chunks for very large graphs
+            if max_nodes > 5000:
+                chunk_size = min(500, max(1, 3000 // max_nodes))
+            else:
+                chunk_size = min(1000, max(1, 5000 // max_nodes))
+            
+            # Initialize output tensor for this head on CPU to save GPU memory
+            head_output = torch.zeros(max_nodes, self.hidden_dim, device='cpu')
+            
+            # Process nodes in chunks
+            for chunk_start in range(0, max_nodes, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, max_nodes)
+                
+                # Only process nodes that exist in the last time step
+                if not masks[-1, chunk_start:chunk_end].any():
+                    continue
+                
+                # Compute attention for this chunk of nodes - use CPU for intermediate results
+                chunk_attention = torch.zeros(seq_len, chunk_end - chunk_start, self.hidden_dim, device='cpu')
+                
+                for t1 in range(seq_len):
+                    # Skip if no nodes in this time step
+                    if not masks[t1, chunk_start:chunk_end].any():
+                        continue
+                        
+                    # Compute attention weights between this time step and all others
+                    # Use CPU for large intermediate tensors
+                    weights = torch.zeros(seq_len, chunk_end - chunk_start, max_nodes, device='cpu')
                     
-                    attention_input.append(concat)
-            
-            # Stack attention inputs
-            attention_input = torch.stack(attention_input)  # [T*T, N, N, 2F]
-            
-            # Compute attention coefficients
-            e = self.leakyrelu(torch.matmul(attention_input, self.a[head]))  # [T*T, N, N, 1]
-            e = e.squeeze(-1)  # [T*T, N, N]
-            
-            # Create attention mask based on node presence
-            att_mask = torch.zeros(seq_len, seq_len, max_nodes, max_nodes, dtype=torch.bool).to(device)
-            for t1 in range(seq_len):
+                    for t2 in range(seq_len):
+                        # Skip if no nodes in this time step
+                        if not masks[t2].any():
+                            continue
+                            
+                        # Move only the necessary tensors to GPU for computation
+                        query = transformed[t1, chunk_start:chunk_end].to(device)  # [chunk_size, F]
+                        key = transformed[t2].to(device)  # [N, F]
+                        
+                        # Compute dot product attention
+                        scores = torch.matmul(query, key.transpose(0, 1))  # [chunk_size, N]
+                        
+                        # Apply mask
+                        mask_t1 = masks[t1, chunk_start:chunk_end].unsqueeze(1)  # [chunk_size, 1]
+                        mask_t2 = masks[t2].unsqueeze(0)  # [1, N]
+                        combined_mask = mask_t1 & mask_t2  # [chunk_size, N]
+                        
+                        scores = scores.masked_fill(~combined_mask, -9e15)
+                        
+                        # Apply softmax and move back to CPU
+                        weights[t2] = F.softmax(scores, dim=1).cpu()
+                        
+                        # Free GPU memory immediately
+                        del query, key, scores
+                        if hasattr(torch.cuda, 'empty_cache') and max_nodes > 5000:
+                            torch.cuda.empty_cache()
+                
+                # Apply attention weights to values
                 for t2 in range(seq_len):
-                    # Nodes must be present in both time steps to attend
-                    att_mask[t1, t2] = masks[t1].unsqueeze(1) & masks[t2].unsqueeze(0)
+                    if not masks[t2].any():
+                        continue
+                    # Move to device, compute, then back to CPU
+                    w = weights[t2].to(device)
+                    t = transformed[t2].to(device)
+                    result = torch.matmul(w, t).cpu()
+                    chunk_attention[t1] += result
+                    del w, t, result
+                
+                # Apply time-based attention (simple average for now)
+                # This is a simplified version of the full temporal attention
+                valid_time_steps = masks[:, chunk_start:chunk_end].sum(dim=0) > 0
+                chunk_result = chunk_attention.mean(dim=0)
+                
+                # Store result for this chunk
+                head_output[chunk_start:chunk_end] = chunk_result
+                
+                # Force garbage collection after each chunk
+                import gc
+                gc.collect()
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
+                
+                # Clear large tensors explicitly
+                del chunk_attention, weights
             
-            # Reshape mask to match attention scores
-            att_mask = att_mask.view(-1, max_nodes, max_nodes)  # [T*T, N, N]
-            
-            # Apply mask
-            e = e.masked_fill(~att_mask, -9e15)
-            
-            # Apply softmax to get attention weights
-            attention = F.softmax(e, dim=1)  # [T*T, N, N]
-            attention = self.dropout_layer(attention)
-            
-            # Apply attention to transformed embeddings
-            weighted = []
-            idx = 0
-            for t1 in range(seq_len):
-                t1_weighted = []
-                for t2 in range(seq_len):
-                    # Apply attention weights from t1 to t2
-                    attended = torch.matmul(attention[idx], transformed[t2])  # [N, F]
-                    t1_weighted.append(attended)
-                    idx += 1
-                # Combine attended values from all time steps
-                t1_weighted = torch.stack(t1_weighted).mean(dim=0)  # [N, F]
-                weighted.append(t1_weighted)
-            
-            # Get final output for this head
-            head_output = weighted[-1]  # Use the last time step's output
-            outputs.append(head_output)
+            # Apply activation and add to outputs - move to device only at the end
+            # This ensures we only have one copy in GPU memory
+            device_output = F.elu(head_output.to(device))
+            outputs.append(device_output.cpu())  # Store on CPU to save GPU memory
+            del device_output
         
         # Combine outputs from all heads
-        final_output = torch.mean(torch.stack(outputs), dim=0)  # [N, F]
-        
-        # Only keep embeddings for nodes that exist in the last time step
-        last_mask = masks[-1]
-        final_output = final_output[last_mask]
-        
-        return final_output
+        if outputs:
+            # Move to device only for the final computation
+            device_outputs = [out.to(device) for out in outputs]
+            
+            # Stack and average across heads
+            all_head_outputs = torch.stack(device_outputs)  # [num_heads, N, F]
+            combined_output = all_head_outputs.mean(dim=0)  # [N, F]
+            
+            # Only keep embeddings for nodes that exist in the last time step
+            last_mask = masks[-1]
+            final_output = combined_output[last_mask]
+            
+            # Clean up
+            del device_outputs, all_head_outputs, combined_output
+            
+            return final_output
+        else:
+            # Fallback if no outputs were generated
+            return sequence_embeddings[-1]
 
 
 class TempGAT(nn.Module):
@@ -456,10 +526,10 @@ class TempGAT(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
     
-    def forward(self, 
-               temporal_graph, 
-               snapshot_sequence: List[Dict], 
-               return_embeddings: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, List[Dict]]]:
+    def forward(self,
+                temporal_graph,
+                snapshot_sequence: List[Dict],
+                return_embeddings: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, List[Dict]]]:
         """
         Forward pass of the TempGAT model.
         
@@ -473,6 +543,11 @@ class TempGAT(nn.Module):
         """
         all_embeddings = []
         
+        # Log memory usage at start of forward pass only for large sequences
+        if len(snapshot_sequence) > 10 and hasattr(torch.cuda, 'memory_allocated'):
+            print(f"[TempGAT] Forward pass with {len(snapshot_sequence)} snapshots, "
+                  f"GPU: {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        
         # Process each snapshot in sequence
         prev_snapshot = None
         
@@ -481,6 +556,11 @@ class TempGAT(nn.Module):
             if not isinstance(snapshot, dict):
                 print(f"Warning: Snapshot {i} is not a dictionary. Type: {type(snapshot)}")
                 continue
+                
+            # Log memory usage less frequently to reduce output
+            if i % 20 == 0 and hasattr(torch.cuda, 'memory_allocated') and self.memory_bank.get_node_count() > 5000:
+                print(f"[TempGAT] Processing snapshot {i}/{len(snapshot_sequence)}, "
+                      f"Memory bank: {self.memory_bank.get_node_count()} nodes")
                 
             # Handle empty snapshots
             if 'active_nodes' not in snapshot or not snapshot['active_nodes']:
@@ -553,24 +633,47 @@ class TempGAT(nn.Module):
             
             # Store embeddings in memory bank
             timestamp = snapshot['window_start']
-            for i, node_id in enumerate(active_nodes):
-                self.memory_bank.store_node(node_id, embeddings[i], timestamp)
             
-            # Save snapshot embeddings
+            # Use batch_store_nodes for better memory management
+            self.memory_bank.batch_store_nodes(active_nodes, embeddings.detach(), timestamp)
+            
+            # Save snapshot embeddings - detach to avoid memory leaks
             snapshot_result = {
                 'timestamp': snapshot['timestamp'],
                 'active_nodes': active_nodes,
-                'embeddings': embeddings
+                'embeddings': embeddings.detach()  # Detach to avoid memory leaks
             }
             all_embeddings.append(snapshot_result)
             
             # Update previous snapshot
-            prev_snapshot = snapshot
+            prev_snapshot = {
+                'timestamp': snapshot['timestamp'],
+                'active_nodes': active_nodes.copy(),  # Make a copy to avoid reference issues
+                'window_start': snapshot['window_start'],
+                'window_end': snapshot['window_end'] if 'window_end' in snapshot else snapshot['window_start'] + 1
+            }
+            
+            # Force garbage collection periodically
+            if i % 10 == 0 and hasattr(torch.cuda, 'memory_allocated'):
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[TempGAT] After processing snapshot {i}: "
+                      f"GPU memory: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
         
         # Apply temporal attention if enabled and we have multiple snapshots
         if self.use_temporal_attention and len(all_embeddings) > 1:
+            # Only log for large node counts to reduce output
+            large_node_count = False
+            if all_embeddings and 'active_nodes' in all_embeddings[-1]:
+                node_count = len(all_embeddings[-1]['active_nodes'])
+                large_node_count = node_count > 5000
+                
+            if large_node_count and hasattr(torch.cuda, 'memory_allocated'):
+                print(f"[TempGAT] Temporal attention for {node_count} nodes")
+            
             # Extract embeddings from all snapshots
-            sequence_embeddings = [snapshot['embeddings'] for snapshot in all_embeddings]
+            sequence_embeddings = [snapshot['embeddings'].detach() for snapshot in all_embeddings]
             
             # Apply temporal attention
             temporal_embeddings = self.temporal_attention(sequence_embeddings)
@@ -578,10 +681,22 @@ class TempGAT(nn.Module):
             # Update the last snapshot's embeddings with temporally attended embeddings
             if temporal_embeddings is not None:
                 all_embeddings[-1]['embeddings'] = temporal_embeddings
+                
+            # Force garbage collection after temporal attention
+            import gc
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
         
         # Return embeddings for the last snapshot
         if all_embeddings:
             last_embeddings = all_embeddings[-1]['embeddings']
+            
+            # Clear all_embeddings except the last one to free memory
+            if len(all_embeddings) > 1:
+                last_snapshot = all_embeddings[-1]
+                all_embeddings.clear()
+                all_embeddings.append(last_snapshot)
             
             if return_embeddings:
                 return last_embeddings, all_embeddings

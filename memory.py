@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, Optional, List, Tuple
 import heapq
 from collections import defaultdict
+import inspect
 
 
 class MemoryBank:
@@ -31,6 +32,10 @@ class MemoryBank:
         self.max_size = max_size
         self.pruning_threshold = pruning_threshold
         self.current_timestamp = 0
+        # Set pruning percentage - remove this percentage of nodes when max_size is reached
+        self.pruning_percentage = 0.3  # Remove 30% of nodes when pruning
+        # Set buffer percentage - how much over max_size before pruning
+        self.buffer_percentage = 0.03  # Prune when 3% over max_size
     
     def store_node(self, node_id: int, embedding: torch.Tensor, timestamp: int) -> None:
         """
@@ -43,16 +48,29 @@ class MemoryBank:
         """
         # Update current timestamp
         self.current_timestamp = max(self.current_timestamp, timestamp)
+        # Log memory bank size less frequently to reduce output
+        if len(self.node_embeddings) % 5000 == 0:
+            print(f"[MemoryBank] Size: {len(self.node_embeddings)} nodes")
+        
+        # Ensure embedding is fully detached from computation graph and on CPU
+        # This helps prevent memory leaks by ensuring the tensor doesn't retain connections
+        # to the computation graph that created it
+        cpu_embedding = embedding.detach().cpu().clone()
         
         # Check if node already exists
         if node_id in self.node_embeddings:
-            _, last_updated, access_count = self.node_embeddings[node_id]
-            self.node_embeddings[node_id] = (embedding.detach().clone(), timestamp, access_count + 1)
+            # Delete old embedding explicitly to help with memory management
+            old_embedding, last_updated, access_count = self.node_embeddings[node_id]
+            del old_embedding
+            self.node_embeddings[node_id] = (cpu_embedding, timestamp, access_count + 1)
         else:
-            self.node_embeddings[node_id] = (embedding.detach().clone(), timestamp, 1)
+            self.node_embeddings[node_id] = (cpu_embedding, timestamp, 1)
         
-        # Check if pruning is needed
-        if len(self.node_embeddings) > self.max_size:
+        # Check if pruning is needed - use a smaller buffer to be more aggressive
+        if len(self.node_embeddings) > self.max_size * (1 + self.buffer_percentage):
+            # Only log when pruning large memory banks
+            if self.max_size > 5000:
+                print(f"[MemoryBank] Pruning at {len(self.node_embeddings)} nodes")
             self.prune_memory_bank(timestamp)
     
     def retrieve_node(self, node_id: int, current_timestamp: int) -> Optional[torch.Tensor]:
@@ -77,10 +95,34 @@ class MemoryBank:
         # Apply time decay based on time difference
         time_diff = current_timestamp - last_updated
         decay = self.decay_factor ** time_diff if time_diff > 0 else 1.0
+        
+        # Move to the device of the caller if needed
+        # This is determined by checking if we're in a PyTorch module's forward pass
+        device = None
+        for frame in inspect.stack():
+            if 'self' in frame[0].f_locals:
+                obj = frame[0].f_locals['self']
+                if isinstance(obj, torch.nn.Module) and hasattr(obj, 'parameters'):
+                    try:
+                        # Get device from the first parameter
+                        for param in obj.parameters():
+                            device = param.device
+                            break
+                    except:
+                        pass
+            if device is not None:
+                break
+        
+        # If we found a device, move the embedding to it
+        if device is not None:
+            embedding = embedding.to(device)
+        
+        # Apply decay
         decayed_embedding = embedding * decay
         
         # Update access count
-        self.node_embeddings[node_id] = (embedding, last_updated, access_count + 1)
+        self.node_embeddings[node_id] = (embedding.cpu() if device is not None else embedding,
+                                        last_updated, access_count + 1)
         
         return decayed_embedding
     
@@ -114,14 +156,34 @@ class MemoryBank:
         # Sort by importance (ascending)
         scores.sort()
         
-        # Keep only the top max_size nodes
-        nodes_to_keep = set(node_id for _, node_id in scores[-max_size:])
+        # Calculate target size based on pruning_percentage
+        # This prevents constant pruning of just a few nodes at a time
+        target_size = int(max_size * (1 - self.pruning_percentage))
+        
+        # Keep only the top target_size nodes
+        nodes_to_keep = set(node_id for _, node_id in scores[-target_size:])
         
         # Remove nodes not in the keep set
-        self.node_embeddings = {
-            node_id: data for node_id, data in self.node_embeddings.items()
-            if node_id in nodes_to_keep
-        }
+        before_size = len(self.node_embeddings)
+        
+        # Explicitly delete embeddings to help with memory management
+        for node_id in list(self.node_embeddings.keys()):
+            if node_id not in nodes_to_keep:
+                # Delete the embedding tensor explicitly
+                embedding, _, _ = self.node_embeddings[node_id]
+                del embedding
+                # Remove from dictionary
+                del self.node_embeddings[node_id]
+        
+        # Only log for large memory banks
+        if self.max_size > 5000:
+            print(f"[MemoryBank] Pruned: {before_size} -> {len(self.node_embeddings)} nodes")
+            
+        # Force garbage collection
+        import gc
+        gc.collect()
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
     
     def get_all_nodes(self) -> List[int]:
         """
@@ -167,6 +229,22 @@ class MemoryBank:
             # If memory bank is empty, assume a default dimension
             embedding_dim = 64
         
+        # Determine target device
+        device = None
+        for frame in inspect.stack():
+            if 'self' in frame[0].f_locals:
+                obj = frame[0].f_locals['self']
+                if isinstance(obj, torch.nn.Module) and hasattr(obj, 'parameters'):
+                    try:
+                        # Get device from the first parameter
+                        for param in obj.parameters():
+                            device = param.device
+                            break
+                    except:
+                        pass
+            if device is not None:
+                break
+        
         # Retrieve embeddings
         embeddings = []
         for node_id in node_ids:
@@ -174,9 +252,23 @@ class MemoryBank:
             if embedding is not None:
                 embeddings.append(embedding)
             else:
-                embeddings.append(torch.zeros(embedding_dim))
+                # Create zeros tensor on the appropriate device
+                zeros = torch.zeros(embedding_dim)
+                if device is not None:
+                    zeros = zeros.to(device)
+                embeddings.append(zeros)
         
-        return torch.stack(embeddings) if embeddings else torch.tensor([])
+        # Stack embeddings and ensure they're on the right device
+        if embeddings:
+            stacked = torch.stack(embeddings)
+            if device is not None:
+                stacked = stacked.to(device)
+            return stacked
+        else:
+            empty = torch.tensor([])
+            if device is not None:
+                empty = empty.to(device)
+            return empty
     
     def batch_store_nodes(self, node_ids: List[int], embeddings: torch.Tensor, timestamp: int) -> None:
         """
@@ -187,8 +279,24 @@ class MemoryBank:
             embeddings: Tensor of node embeddings
             timestamp: Current timestamp
         """
-        for i, node_id in enumerate(node_ids):
-            self.store_node(node_id, embeddings[i], timestamp)
+        # Process in batches to reduce memory pressure
+        batch_size = 32  # Process 32 nodes at a time
+        
+        for batch_start in range(0, len(node_ids), batch_size):
+            batch_end = min(batch_start + batch_size, len(node_ids))
+            batch_node_ids = node_ids[batch_start:batch_end]
+            batch_embeddings = embeddings[batch_start:batch_end]
+            
+            # Store each node in the batch
+            for i, node_id in enumerate(batch_node_ids):
+                self.store_node(node_id, batch_embeddings[i], timestamp)
+                
+            # Force garbage collection after each batch
+            if batch_end % 128 == 0:  # Every 4 batches
+                import gc
+                gc.collect()
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
 
 
 def propagate_between_snapshots(previous_snapshot, current_snapshot, memory_bank):
