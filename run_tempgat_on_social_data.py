@@ -37,6 +37,29 @@ class SocialMediaTemporalGraph(TemporalGraph):
         # Create a new temporal graph
         temporal_graph = cls(window_size=processed_data['window_size'])
         
+        # Debug logging to check the snapshots before assignment
+        print(f"DEBUG: Processing snapshots of type: {type(processed_data['snapshots'])}")
+        if processed_data['snapshots'] and len(processed_data['snapshots']) > 0:
+            print(f"DEBUG: First snapshot in from_processed_data: {type(processed_data['snapshots'][0])}")
+            
+        # Check if snapshots are strings and try to convert them to dictionaries
+        if processed_data['snapshots'] and isinstance(processed_data['snapshots'][0], str):
+            print("DEBUG: Detected string snapshots, attempting to convert to dictionaries...")
+            try:
+                import json
+                converted_snapshots = []
+                for snapshot_str in processed_data['snapshots']:
+                    try:
+                        snapshot_dict = json.loads(snapshot_str)
+                        converted_snapshots.append(snapshot_dict)
+                    except json.JSONDecodeError as e:
+                        print(f"DEBUG: Error decoding snapshot JSON: {e}")
+                        # Skip this snapshot
+                processed_data['snapshots'] = converted_snapshots
+                print(f"DEBUG: Converted {len(converted_snapshots)} snapshots to dictionaries")
+            except Exception as e:
+                print(f"DEBUG: Error converting snapshots: {e}")
+        
         # Set attributes
         temporal_graph.snapshots = processed_data['snapshots']
         
@@ -50,7 +73,10 @@ class SocialMediaTemporalGraph(TemporalGraph):
         # Create node ID mapping
         all_nodes = set()
         for snapshot in temporal_graph.snapshots:
-            all_nodes.update(snapshot['active_nodes'])
+            if isinstance(snapshot, dict) and 'active_nodes' in snapshot:
+                all_nodes.update(snapshot['active_nodes'])
+            else:
+                print(f"DEBUG: Skipping invalid snapshot: {type(snapshot)}")
         
         for i, node_id in enumerate(sorted(all_nodes)):
             temporal_graph.node_id_map[node_id] = i
@@ -82,6 +108,15 @@ def load_processed_data(data_path):
     """
     with open(data_path, 'rb') as f:
         processed_data = pickle.load(f)
+    
+    # Debug logging to check the loaded data structure
+    print(f"DEBUG: Loaded processed data type: {type(processed_data)}")
+    if 'snapshots' in processed_data:
+        print(f"DEBUG: Snapshots type: {type(processed_data['snapshots'])}")
+        if processed_data['snapshots'] and len(processed_data['snapshots']) > 0:
+            print(f"DEBUG: First snapshot type: {type(processed_data['snapshots'][0])}")
+            if isinstance(processed_data['snapshots'][0], str):
+                print(f"DEBUG: First snapshot content (first 100 chars): {processed_data['snapshots'][0][:100]}")
     
     return processed_data
 
@@ -274,7 +309,8 @@ def run_tempgat_on_social_data(data_path, output_dir, params):
         output_dim=params['output_dim'],
         num_heads=params['num_heads'],
         memory_decay_factor=params['memory_decay'],
-        dropout=params['dropout']
+        dropout=params['dropout'],
+        max_memory_size=1000
     ).to(device)
     
     # Split snapshots into train, validation, and test sets
@@ -364,7 +400,11 @@ def run_tempgat_on_social_data(data_path, output_dir, params):
         # Create a proper sequence of snapshot dictionaries
         sequence = valid_test_snapshots[i:i+seq_length]
         if len(sequence) == seq_length:
-            test_sequences.append(sequence)
+            # Verify that all items in the sequence are dictionaries
+            if all(isinstance(s, dict) for s in sequence):
+                test_sequences.append(sequence)
+            else:
+                print(f"Skipping sequence with non-dictionary items at index {i}")
     
     print(f"Created {len(test_sequences)} test sequences")
     
@@ -374,13 +414,17 @@ def run_tempgat_on_social_data(data_path, output_dir, params):
     
     for sequence in tqdm(test_sequences, desc="Evaluating test sequences"):
         try:
-            # Make sure sequence is a list of dictionaries
-            if isinstance(sequence, list) and all(isinstance(s, dict) for s in sequence):
+            # Double-check that sequence is a list of dictionaries
+            if isinstance(sequence, list) and all(isinstance(s, dict) and 'active_nodes' in s for s in sequence):
+                # Pass the sequence directly to evaluate, not nested in another list
                 loss, metrics = trainer.evaluate([sequence], task=params['task'])
                 test_losses.append(loss)
                 test_metrics.append(metrics)
             else:
                 print(f"Skipping invalid sequence: {type(sequence)}")
+                if isinstance(sequence, list):
+                    for i, s in enumerate(sequence):
+                        print(f"  Item {i} type: {type(s)}")
         except Exception as e:
             print(f"Error evaluating sequence: {e}")
     
@@ -406,17 +450,27 @@ def run_tempgat_on_social_data(data_path, output_dir, params):
         
         # Get a single snapshot from the test set
         if test_snapshots:
-            # Use just one snapshot for testing
-            simple_sequence = [test_snapshots[0]]
+            # Make sure we have a valid snapshot (dictionary)
+            valid_snapshot = None
+            for snapshot in test_snapshots:
+                if isinstance(snapshot, dict) and 'active_nodes' in snapshot:
+                    valid_snapshot = snapshot
+                    break
             
-            try:
-                # Evaluate on this simple sequence
-                loss, metrics = trainer.evaluate([simple_sequence], task=params['task'])
-                print(f"Simple test loss: {loss:.4f}")
-                for key, value in metrics.items():
-                    print(f"Simple test {key}: {value:.4f}")
-            except Exception as e:
-                print(f"Error evaluating simple sequence: {e}")
+            if valid_snapshot:
+                # Create a proper sequence with a single snapshot
+                simple_sequence = [valid_snapshot]
+                
+                try:
+                    # Evaluate on this simple sequence - pass the sequence directly, not nested
+                    loss, metrics = trainer.evaluate([simple_sequence], task=params['task'])
+                    print(f"Simple test loss: {loss:.4f}")
+                    for key, value in metrics.items():
+                        print(f"Simple test {key}: {value:.4f}")
+                except Exception as e:
+                    print(f"Error evaluating simple sequence: {e}")
+            else:
+                print("No valid snapshots found for testing")
     
     # Compute efficiency metrics
     print("Computing efficiency metrics...")

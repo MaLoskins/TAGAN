@@ -31,11 +31,11 @@ def main():
     parser.add_argument('--dataset', type=str, default='pheme',
                         choices=['pheme', 'twitter15', 'rumoureval'],
                         help='Dataset to use')
-    parser.add_argument('--window_size', type=int, default=15,
+    parser.add_argument('--window_size', type=int, default=60,
                         help='Window size in minutes')
-    parser.add_argument('--num_epochs', type=int, default=20,
+    parser.add_argument('--num_epochs', type=int, default=4,
                         help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size')
     parser.add_argument('--sequence_length', type=int, default=5,
                         help='Sequence length')
