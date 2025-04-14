@@ -8,8 +8,8 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
 
-from data import TemporalGraph, create_temporal_batches
-from model import TempGAT
+from src.utils.data import TemporalGraph, create_temporal_batches
+from src.model.model import TempGAT
 from utils import node_classification_loss, link_prediction_loss
 
 

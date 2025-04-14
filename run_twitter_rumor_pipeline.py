@@ -35,7 +35,7 @@ def main():
                         help='Window size in minutes')
     parser.add_argument('--num_epochs', type=int, default=4,
                         help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=64,
                         help='Batch size')
     parser.add_argument('--sequence_length', type=int, default=5,
                         help='Sequence length')

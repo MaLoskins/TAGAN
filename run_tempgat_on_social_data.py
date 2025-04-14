@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from data import TemporalGraph
 from model import TempGAT
-from trainer import TemporalTrainer
+from src.training.trainer import TemporalTrainer
 from metrics import computational_efficiency_metrics, evaluate_long_term_dependencies
 
 

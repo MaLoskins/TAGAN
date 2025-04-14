@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 
-from data import TemporalGraph, create_temporal_batches
-from memory import MemoryBank, propagate_between_snapshots, handle_empty_snapshot
-from model import TempGAT, SnapshotGAT
+from src.utils.data import TemporalGraph, create_temporal_batches
+from src.utils.memory import MemoryBank, propagate_between_snapshots, handle_empty_snapshot
+from src.model.model import TempGAT, SnapshotGAT
 from utils import create_symmetric_mask, masked_attention
 
 
@@ -391,7 +391,7 @@ class TestIntegration(unittest.TestCase):
     
     def test_training_loop(self):
         """Test a complete training loop."""
-        from trainer import TemporalTrainer
+        from src.training.trainer import TemporalTrainer
         
         # Create trainer
         trainer = TemporalTrainer(self.model, self.temporal_graph)
