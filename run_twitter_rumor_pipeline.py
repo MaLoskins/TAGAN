@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import sys
 import time
+from src.utils.utils import logger
 
 def run_command(command, description=None):
     """Run a command and print its output in real-time."""

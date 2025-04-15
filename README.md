@@ -1,27 +1,111 @@
-# TempGAT: Temporal Graph Attention Network with Dynamic Memory
+# TempGAT: Temporal Graph Attention Network for Twitter Rumor Analysis
 
-TempGAT is a PyTorch implementation of a novel geometric neural network architecture that applies graph attention mechanisms to temporal social media data. The architecture processes graph data as a sequence of temporal snapshots, maintaining node states in a memory bank between active periods to optimize computational efficiency while preserving long-term dependencies.
+## Overview
+
+TempGAT (Temporal Graph Attention Network) is a deep learning architecture designed for analyzing temporal graph data, with a specific application to Twitter rumor detection. The model achieves approximately 77% accuracy on the PHEME dataset in just one epoch, demonstrating its effectiveness for rumor classification tasks.
+
+This repository contains the implementation of TempGAT, along with scripts for downloading, preprocessing, and analyzing Twitter rumor datasets.
+
+## Table of Contents
+
+- [TempGAT: Temporal Graph Attention Network for Twitter Rumor Analysis](#tempgat-temporal-graph-attention-network-for-twitter-rumor-analysis)
+  - [Overview](#overview)
+  - [Table of Contents](#table-of-contents)
+  - [Architecture Overview](#architecture-overview)
+  - [Key Components](#key-components)
+    - [1. GraphAttentionLayer](#1-graphattentionlayer)
+    - [2. SnapshotGAT](#2-snapshotgat)
+    - [3. TemporalAttention](#3-temporalattention)
+    - [4. MemoryBank](#4-memorybank)
+    - [5. TempGAT](#5-tempgat)
+  - [Data Flow](#data-flow)
+  - [Installation and Setup](#installation-and-setup)
+  - [Usage](#usage)
+  - [Performance](#performance)
+  - [Implementation Details](#implementation-details)
+    - [Temporal Graph Structure](#temporal-graph-structure)
+    - [Memory Mechanism](#memory-mechanism)
+    - [Attention Mechanisms](#attention-mechanisms)
+  - [References](#references)
 
 ## Architecture Overview
 
-TempGAT extends Graph Attention Networks (GAT) with temporal dynamics through a novel approach:
+TempGAT is a temporal graph neural network that combines Graph Attention Networks (GAT) with temporal processing and a memory mechanism. The architecture is designed to handle the dynamic nature of social media interactions, where users and tweets appear and disappear over time.
 
-1. **Temporal Discretization**: Rather than processing the entire graph simultaneously, the model segments the social media activity timeline into fixed temporal windows (e.g., 15-minute intervals), creating a sequence of graph "snapshots."
+```mermaid
+graph TD
+    A[TempGAT] --> B[Input Processing]
+    A --> C[Graph Processing]
+    A --> D[Temporal Processing]
+    A --> E[Memory Mechanism]
+    A --> F[Output Processing]
+    
+    B --> B1[Feature Extraction]
+    B --> B2[Adjacency Matrix Creation]
+    
+    C --> C1[GraphAttentionLayer]
+    C --> C2[SnapshotGAT]
+    C --> C3[Multi-head Attention]
+    
+    D --> D1[TemporalAttention]
+    D --> D2[Sequence Processing]
+    
+    E --> E1[MemoryBank]
+    E --> E2[Propagation Between Snapshots]
+    E --> E3[Memory Decay]
+    
+    F --> F1[Node Classification]
+    F --> F2[Link Prediction]
+```
 
-2. **Dynamic Node Participation**: Each snapshot contains only actively participating nodes within that time window. This creates variable-sized adjacency matrices across snapshots, as the number of active nodes fluctuates over time.
+## Key Components
 
-3. **Symmetric Masking for Asymmetric Interactions**: To handle the mathematical challenges of variable-sized matrices in deep learning operations, the model applies symmetric masking to the fundamentally asymmetric social media interactions, enabling proper gradient propagation while preserving directional information.
+### 1. GraphAttentionLayer
 
-4. **Localized GAT Operations**: The standard GAT attention mechanism operates efficiently on each snapshot's significantly reduced node set, computing embeddings based on local graph structure.
+The `GraphAttentionLayer` class implements the Graph Attention mechanism, allowing the model to focus on the most relevant connections in the graph.
 
-5. **Temporal State Propagation**: As the model advances to subsequent snapshots:
-   - Nodes persisting across snapshots carry forward their updated embeddings and attention weights
-   - Nodes becoming inactive are transferred to a memory bank
-   - Previously inactive nodes re-entering the graph retrieve their stored embeddings from the memory bank
+### 2. SnapshotGAT
 
-6. **Memory Persistence Mechanism**: The memory bank serves as a stateful repository, preserving node embeddings during periods of inactivity, allowing the model to maintain long-term dependencies without the computational cost of processing the entire graph.
+The `SnapshotGAT` class processes individual graph snapshots, applying graph attention to capture the structural relationships within each time window.
 
-## Installation
+### 3. TemporalAttention
+
+The `TemporalAttention` class captures dependencies across time, allowing the model to attend to node states across different time steps.
+
+### 4. MemoryBank
+
+The `MemoryBank` class stores and retrieves node embeddings across time, applying time decay and pruning to maintain efficiency.
+
+### 5. TempGAT
+
+The `TempGAT` class integrates all components, processing temporal graph data and producing node embeddings for rumor classification.
+
+## Data Flow
+
+The data flows through the system as follows:
+
+```mermaid
+flowchart TD
+    A[Raw Twitter Data] --> B[Processed Data]
+    B --> C[Temporal Graph Snapshots]
+    C --> D[Feature Extraction]
+    D --> E[Graph Attention Processing]
+    E --> F[Memory Storage/Retrieval]
+    F --> G[Temporal Attention Processing]
+    G --> H[Final Node Embeddings]
+    H --> I[Rumor Classification]
+```
+
+1. **Data Loading**: Raw Twitter rumor data is loaded and processed.
+2. **Temporal Graph Creation**: The data is converted into a sequence of temporal graph snapshots.
+3. **Feature Extraction**: Node features are extracted from the data.
+4. **Model Processing**:
+   - Each snapshot is processed by the `SnapshotGAT` component.
+   - Node embeddings are stored in the `MemoryBank`.
+   - Temporal dependencies are captured by the `TemporalAttention` component.
+5. **Prediction**: The final node embeddings are used for rumor detection.
+
+## Installation and Setup
 
 ```bash
 # Clone the repository
@@ -30,141 +114,86 @@ cd tempgat
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Download and preprocess data
+python download_twitter_rumor.py --dataset pheme
+python preprocess_dataset.py --raw_data_dir data/twitter_rumor/processed --processed_data_dir data/twitter_rumor/processed --window_size 60
 ```
-
-## Requirements
-
-- Python 3.7+
-- PyTorch 1.10+
-- torch-geometric
-- numpy
-- scipy
-- pandas
-- matplotlib
-- networkx
-- scikit-learn
-
-## Project Structure
-
-- `data.py`: Implementation of the `TemporalGraph` class and data handling utilities
-- `memory.py`: Implementation of the `MemoryBank` class and memory-related functions
-- `model.py`: Implementation of the `TempGAT` and `SnapshotGAT` models
-- `utils.py`: Utility functions for masking, attention, and other operations
-- `trainer.py`: Training infrastructure for TempGAT models
-- `metrics.py`: Evaluation metrics for temporal graph tasks
-- `main.py`: Example script demonstrating TempGAT usage
-- `test.py`: Unit tests for the TempGAT implementation
 
 ## Usage
 
-### Basic Usage
+To run the TempGAT model on the PHEME dataset:
+
+```bash
+python run_twitter_rumor_pipeline.py --dataset pheme --window_size 60 --num_epochs 4
+```
+
+To skip the download and preprocessing steps:
+
+```bash
+python run_twitter_rumor_pipeline.py --skip-download --dataset pheme
+```
+
+## Performance
+
+The TempGAT model achieves approximately 77% accuracy on the PHEME dataset in just one epoch. The key parameters that contribute to this performance are:
+
+- `hidden_dim`: 64
+- `output_dim`: 32
+- `num_heads`: 8
+- `memory_decay`: 0.9
+- `dropout`: 0.2
+- `learning_rate`: 0.001
+
+## Implementation Details
+
+### Temporal Graph Structure
+
+The temporal graph structure represents the Twitter rumor data as a sequence of graph snapshots, where each snapshot captures the state of the graph at a specific time window.
 
 ```python
-import torch
-import pandas as pd
-from data import TemporalGraph
-from model import TempGAT
-from trainer import TemporalTrainer
-
-# Load your temporal interaction data
-interactions_df = pd.read_csv('your_data.csv')
-
-# Create a temporal graph
-temporal_graph = TemporalGraph.from_interactions(
-    interactions_df,
-    time_column='timestamp',
-    source_column='source_id',
-    target_column='target_id',
-    features_columns=['feature1', 'feature2'],
-    window_size=15  # minutes
-)
-
-# Create a TempGAT model
-model = TempGAT(
-    input_dim=temporal_graph.feature_dim,
-    hidden_dim=64,
-    output_dim=32,
-    num_heads=8,
-    memory_decay_factor=0.9,
-    dropout=0.2
-)
-
-# Create a trainer
-trainer = TemporalTrainer(model, temporal_graph)
-
-# Train the model
-trainer.train(
-    num_epochs=200,
-    batch_size=32,
-    sequence_length=10,  # snapshots per sequence
-    learning_rate=0.001,
-    task='node_classification'  # or 'link_prediction'
-)
-
-# Make predictions
-predictions = model.predict(
-    temporal_graph,
-    temporal_graph.get_snapshot_sequence(start_time, end_time),
-    task='node_classification'  # or 'link_prediction'
-)
+class TemporalGraph:
+    def __init__(self, window_size: int = 15):
+        self.window_size = window_size  # in minutes
+        self.snapshots = []
+        self.node_id_map = {}  # Maps external node IDs to internal consecutive IDs
+        self.reverse_node_id_map = {}  # Maps internal IDs back to external IDs
+        self.feature_dim = None
+        self.num_nodes = 0
+        self.node_features = {}  # Maps node_id to features
 ```
 
-### Running the Demo
+### Memory Mechanism
 
-```bash
-# Run with synthetic data
-python main.py --synthetic --num_nodes 100 --num_timesteps 50 --visualize
+The memory mechanism allows the model to maintain information about nodes across time, even when they become inactive.
 
-# Run with your own data
-python main.py --data_path your_data.csv --visualize
+```python
+class MemoryBank:
+    def __init__(self, 
+                decay_factor: float = 0.9, 
+                max_size: int = 10000,
+                pruning_threshold: int = 100):
+        self.node_embeddings = {}  # Maps node_id to (embedding, last_updated, access_count)
+        self.decay_factor = decay_factor
+        self.max_size = max_size
+        self.pruning_threshold = pruning_threshold
 ```
 
-### Running Tests
+### Attention Mechanisms
 
-```bash
-python test.py
-```
+The TempGAT architecture uses two types of attention:
 
-## Key Components
+1. **Graph Attention**: Captures structural relationships within each snapshot.
+2. **Temporal Attention**: Captures dependencies across time.
 
-### TemporalGraph
+## References
 
-The `TemporalGraph` class handles the conversion from raw temporal interaction data to a sequence of snapshot graphs. It supports variable-sized adjacency matrices between snapshots and provides methods for creating snapshots, retrieving node features, and creating adjacency matrices.
+For more detailed information about the TempGAT architecture, please refer to the following documents:
 
-### MemoryBank
+- [TempGAT Architecture Analysis](TempGAT_Architecture_Analysis.md)
+- [TempGAT Architecture Diagrams](TempGAT_Architecture_Diagrams.md)
+- [TempGAT Architecture Analysis Plan](TempGAT_Architecture_Analysis_Plan.md)
 
-The `MemoryBank` class efficiently stores and retrieves node embeddings by node ID. It implements a time-decay mechanism for long-stored embeddings and handles pruning of rarely-accessed nodes to prevent memory explosion.
+For more information about the Twitter rumor datasets, please refer to:
 
-### TempGAT
-
-The `TempGAT` class is the main model architecture, composed of `SnapshotGAT`, `MemoryBank`, and temporal propagation logic. It processes each snapshot in sequence, propagating node states between snapshots and maintaining long-term dependencies through the memory bank.
-
-### SnapshotGAT
-
-The `SnapshotGAT` class is a modified GAT implementation for individual snapshots. It handles variable-sized inputs through masking and maintains the multi-head attention mechanism from the original GAT.
-
-## Performance Characteristics
-
-The TempGAT implementation demonstrates:
-
-1. Significant computational savings compared to full-graph GAT
-2. Preservation of predictive performance despite reduced computation
-3. Ability to capture long-term dependencies through the memory mechanism
-4. Scalability to large social media graphs (≥100K nodes)
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```
-@article{tempgat2023,
-  title={TempGAT: Temporal Graph Attention Networks with Dynamic Memory},
-  author={Your Name},
-  journal={arXiv preprint arXiv:xxxx.xxxxx},
-  year={2023}
-}
-```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+- [README_TWITTER_RUMOR.md](README_TWITTER_RUMOR.md)

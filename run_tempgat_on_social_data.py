@@ -12,10 +12,11 @@ from sklearn.model_selection import train_test_split
 import time
 from tqdm import tqdm
 
-from data import TemporalGraph
-from model import TempGAT
+from src.data.data import TemporalGraph
+from src.model.model import TempGAT
 from src.training.trainer import TemporalTrainer
-from metrics import computational_efficiency_metrics, evaluate_long_term_dependencies
+from src.metrics.metrics import computational_efficiency_metrics, evaluate_long_term_dependencies
+from src.utils.utils import logger
 
 
 class SocialMediaTemporalGraph(TemporalGraph):

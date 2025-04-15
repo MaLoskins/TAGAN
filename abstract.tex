@@ -1,0 +1,25 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{TempGAT and Araneos: Scalable and Interpretable Graph Learning for Rumour Detection}
+\author{Matthew Haskins\\Supervisors: Dr Jin Hong}
+\date{}
+\maketitle
+
+\begin{abstract}
+    Misinformation on social media presents complex challenges for public communication and crisis management. Existing machine learning approaches often fall short in modelling the relational and temporal dynamics of online content. This work examines how graph neural networks (GNNs) can enhance both performance and interpretability in the task of automated rumour detection.\newline
+
+First, we introduce \textbf{TempGAT}, a Temporal Sparse Graph Attention Network with stateful node memory. TempGAT processes social media interactions as a sequence of graph “snapshots,” each representing active nodes within a discrete time window. A dynamic node memory bank enables asymmetric information propagation, allowing the model to capture evolving patterns of information diffusion efficiently. Evaluated on the PHEME Twitter rumour dataset, TempGAT achieves high classification accuracy with a scalable architecture suited to social media networks.
+\newline
+
+Second, we present \textbf{Araneos} – a dynamic graph intelligence platform that transforms raw tabular data into structured graph datasets for GNN analysis. Built with a FastAPI backend and React frontend, Araneos supports configurable node/edge definitions, automatic embedding generation (BERT, Word2Vec, GloVe), and browser-based graph visualisation. Araneos supports multiple GNN models (e.g., GCN, GraphSAGE, GAT) and streamlines the full pipeline from ingestion to model-ready input. \newline
+
+Together, TempGAT and Araneos advance the field through complementary innovations in temporal GNN architecture and tooling, addressing the urgent challenge of misinformation detection in dynamic, real-world networks.
+
+\end{abstract}
+
+\end{document}
